@@ -63,33 +63,31 @@ def vision_agent(state: AgentState) -> dict:
 
 def risk_agent(state: AgentState) -> dict:
     """
-    Risk Agent: Evaluates patient metadata/epidemiology.
+    Risk Agent: Evaluates IOP and CCT.
     """
     meta = state.get("patient_metadata", {})
     
     prompt = ChatPromptTemplate.from_template(
         """
-        You are an expert Epidemiology Risk Agent for Glaucoma.
+        You are an expert clinical agent assessing glaucoma risk from IOP and Central Corneal Thickness (CCT).
         
-        Analyze the patient risk profile:
-        - Age: {age}
         - IOP (Intraocular Pressure): {iop} mmHg
-        - Family History: {family_history}
-        - Diabetes: {diabetes}
+        - CCT (Central Corneal Thickness): {cct} μm
         
-        High risk factors include: Age > 60, IOP > 21 mmHg, positive family history.
+        Clinical context:
+        - Normal IOP: 10–21 mmHg. Elevated: >21. Critically high: >30.
+        - Normal CCT: ~520–540 μm. Thin CCT (<520 μm) is an independent risk factor — it means true IOP may be underestimated and the optic nerve is more vulnerable.
+        - Thick CCT (>560 μm) may cause IOP to be overestimated (lower actual risk).
         
-        Provide a concise risk assessment based *only* on these factors.
+        Assess both values together. Note how CCT modifies interpretation of IOP. Do not reference age, family history, or any other factor.
         """
     )
     
     llm = get_llm()
     chain = prompt | llm | StrOutputParser()
     analysis = chain.invoke({
-        "age": meta.get("Age", "Unknown"),
         "iop": meta.get("IOP", "Unknown"),
-        "family_history": meta.get("Family_History", "Unknown"),
-        "diabetes": meta.get("Diabetes", "Unknown")
+        "cct": meta.get("CCT", "Unknown"),
     })
     
     return {"risk_analysis": analysis}
@@ -99,30 +97,26 @@ def diagnostic_agent(state: AgentState) -> dict:
     Diagnostic Agent: Synthesizes model probability with agent analyses.
     """
     prob = state.get("glaucoma_probability", 0.0)
-    vision = state.get("vision_analysis", "")
     risk = state.get("risk_analysis", "")
     
     prompt = ChatPromptTemplate.from_template(
         """
-        You are the Chief Diagnostic Agent. synthesize the evidence.
+        You are the Chief Diagnostic Agent. Synthesize the evidence using ONLY the two inputs below.
         
-        Follow this strict TWO-STEP REASONING PROCESS:
+        STEP 1: FUNDUS IMAGE ASSESSMENT
+        - Deep Learning Probability of glaucoma: {prob:.2%}
+        *Formulate your primary clinical impression based solely on this probability.*
         
-        STEP 1: PRIMARY ASSESSMENT (IMAGE & VISION DATA)
-        - Deep Learning Probability: {prob:.2%}
-        - Vision Analysis: {vision}
-        *Formulate your initial clinical impression based ONLY on the above.*
-        
-        STEP 2: SECONDARY REFINEMENT (PATIENT CONTEXT)
-        - Risk Factors: {risk}
-        *Adjust your suspicion level based on the patient's risk profile (Age, IOP, Family History).*
+        STEP 2: IOP REFINEMENT
+        - IOP Assessment: {risk}
+        *Adjust your impression based on IOP. Do NOT factor in any other variable.*
         
         Determine the final screening category:
         1. Normal / Low Risk
         2. Glaucoma Suspect (requires monitoring)
         3. High Risk / Glaucoma Likely (requires referral)
         
-        Provide your reasoning trace (Step 1 -> Step 2) and final category.
+        Provide your reasoning trace (Step 1 → Step 2) and final category.
         """
     )
     
@@ -130,7 +124,6 @@ def diagnostic_agent(state: AgentState) -> dict:
     chain = prompt | llm | StrOutputParser()
     reasoning = chain.invoke({
         "prob": prob,
-        "vision": vision,
         "risk": risk
     })
     
@@ -138,53 +131,57 @@ def diagnostic_agent(state: AgentState) -> dict:
 
 def report_agent(state: AgentState) -> dict:
     """
-    Report Agent: Generates final clinical report.
+    Report Agent: Generates a patient-specific clinical report based on AI probability, IOP, and CCT only.
     """
     reasoning = state.get("diagnostic_reasoning", "")
-    
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are a Clinical Documentation Agent. Generate a patient screening report.
-        
-        DIAGNOSTIC REASONING:
-        {reasoning}
-        
-        Format the report clearly for a clinician.
-        
-        Structure:
-        - Patient Summary
-        - Structural Findings (Vision) -> OMIT this section if vision analysis states "metrics could not be calculated" or "unavailable".
-        - Risk Assessment (Metadata)
-        - AI Model Prediction
-        - CLINICAL IMPRESSION
-        
-        - DETAILED FUTURE DIAGNOSTIC WORKUP (Must Include):
-          1. **Imaging**: Optical Coherence Tomography (OCT) of the Retinal Nerve Fiber Layer (RNFL) and Ganglion Cell Complex (GCC) to confirm structural damage.
-          2. **Functional Testing**: Standard Automated Perimetry (HVF 24-2) to assess visual field loss. Consider 10-2 if advanced.
-          3. **Clinical Assessment**: 
-             - Gonioscopy to rule out angle-closure.
-             - Pachymetry to measure Central Corneal Thickness (CCT).
-             - Phasing IOP (diurnal measurement) if progression is suspected despite normal office IOP.
+    meta = state.get("patient_metadata", {})
+    iop = meta.get("IOP", "Unknown")
+    cct = meta.get("CCT", "Unknown")
+    prob = state.get("glaucoma_probability", 0.0)
 
-        - CLINICAL MANAGEMENT & MEDICATION PLAN:
-          *If High Risk / Glaucoma Suspect:*
-          1. **First-Line Therapy**: Consider initiating Prostaglandin Analogs (e.g., **Latanoprost 0.005%** q.h.s.) or Beta-Blockers (e.g., **Timolol 0.5%** b.i.d.) if contraindications permit.
-          2. **Target IOP**: Aim for a 20-30% reduction from baseline.
-          3. **Monitoring Schedule**:
-             - Repeat IOP check in **4-6 weeks** after starting meds.
-             - Repeat Visual Field & OCT every **4-6 months** to monitor stability.
-          
-          *If Normal / Low Risk:*
-          1. Routine annual comprehensive eye exam (dilated fundus exam + IOP).
-          2. Patient education on risk factors.
-        
-        Disclaimer: This is an AI screening tool, not a definitive diagnosis.
-        """
+    prompt = ChatPromptTemplate.from_template(
+        """You are a Clinical Documentation Agent generating a glaucoma screening report.
+
+STRICT RULES — violating any of these is unacceptable:
+- Do NOT mention vCDR, optic disc, cup-to-disc ratio, or any structural image metric.
+- Do NOT mention age, family history, diabetes, or any factor not listed below.
+- Do NOT say information is "missing" or "not provided".
+- Do NOT use any pre-written drug list, fixed protocol, or template workup.
+- Every sentence must be derived from the three values below. Generic filler is forbidden.
+
+PATIENT VALUES FOR THIS REPORT:
+- IOP (Intraocular Pressure): {iop} mmHg  [normal 10-21 | elevated 21-30 | critical >30]
+- CCT (Central Corneal Thickness): {cct} μm  [thin <520 = true IOP likely higher | normal 520-540 | thick >560 = IOP may be overestimated]
+- AI Glaucoma Probability: {prob:.1%}  [low <30% | moderate 30-70% | high >70%]
+
+AGENT REASONING:
+{reasoning}
+
+Write exactly these 4 sections. No extra sections, no boilerplate:
+
+**IOP & CCT ASSESSMENT**
+IOP is {iop} mmHg — state whether it is normal, elevated, or critical. CCT is {cct} μm — does it suggest the true IOP is higher or lower than {iop}? State the adjusted clinical risk clearly.
+
+**AI MODEL PREDICTION**
+The AI probability is {prob:.1%} — classify as low, moderate, or high concern and explain what this means clinically for this patient.
+
+**CLINICAL IMPRESSION**
+Given IOP={iop} mmHg, CCT={cct} μm, and AI probability={prob:.1%}, assign a risk category: Normal / Glaucoma Suspect / High Risk. State which specific value is the primary driver.
+
+**RECOMMENDED NEXT STEPS**
+Write 2-4 specific actions based only on the above values. If IOP={iop} is elevated, calculate and state the target IOP (20-30% reduction from {iop}). Do not list generic tests — tie every recommendation to the actual numbers.
+
+*This is an AI screening tool. Final diagnosis requires a qualified ophthalmologist.*"""
     )
-    
-    llm = get_llm()
+
+    llm = ChatGroq(model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), temperature=0.5, api_key=os.getenv("GROQ_API_KEY"))
     chain = prompt | llm | StrOutputParser()
-    report = chain.invoke({"reasoning": reasoning})
-    
+    report = chain.invoke({
+        "reasoning": reasoning,
+        "iop": iop,
+        "cct": cct,
+        "prob": prob,
+    })
+
     return {"final_report": report}
 

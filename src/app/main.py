@@ -86,7 +86,7 @@ def main():
         st.header("⚙️ Settings")
         
         # Groq API Key Input
-        api_key_input = st.text_input("Groq API Key (Optional)", type="password", help="Enter your Groq API key here to enable Agentic Reasoning.")
+        api_key_input = st.text_input("Groq API Key (Required)", type="password", help="A Groq API key is required to run the screening.")
         if api_key_input:
             os.environ["GROQ_API_KEY"] = api_key_input
             
@@ -104,11 +104,15 @@ def main():
         st.divider()
         
         st.header("Patient Data")
-        age = st.number_input("Age", min_value=0, max_value=120, value=65)
-        iop = st.number_input("Intraocular Pressure (mmHg)", 0, 60, 15)
-        family_history = st.selectbox("Family History of Glaucoma", ["No", "Yes"])
-        diabetes = st.selectbox("Diabetes Status", ["No", "Yes"])
+        iop = st.number_input("Intraocular Pressure / IOP (mmHg)", 0, 60, 15)
+        cct = st.number_input("Central Corneal Thickness / CCT (μm)", min_value=400, max_value=700, value=530, help="Normal: 520–540 μm. Thin (<520) increases glaucoma risk; thick (>560) may overestimate IOP.")
         
+    # Hard gate: require API key before anything else runs
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        st.warning("⚠️ Please enter your **Groq API Key** in the sidebar to use this tool.")
+        st.stop()
+
     # Main Area: Image Upload
     uploaded_file = st.file_uploader("Upload Retinal Fundus Image", type=["jpg", "png", "jpeg"])
     
@@ -184,10 +188,8 @@ def main():
             state_input = {
                 "image_path": uploaded_file.name,
                 "patient_metadata": {
-                    "Age": age,
                     "IOP": iop,
-                    "Family_History": family_history,
-                    "Diabetes": diabetes
+                    "CCT": cct,
                 },
                 "segmentation_metrics": metrics,
                 "glaucoma_probability": prob_g,
@@ -195,23 +197,19 @@ def main():
                 "needs_review": False
             }
             
-            if "GROQ_API_KEY" not in os.environ or not os.environ["GROQ_API_KEY"]:
-                 st.error("GROQ_API_KEY not found. Please enter it in the sidebar to enable Agentic Reasoning.")
-                 st.info(f"Model Probability for Glaucoma: {prob_g:.2%}")
-            else:
-                 try:
-                     agent_graph = build_agent_graph() 
-                     result = agent_graph.invoke(state_input)
-                     
-                     st.markdown("### 📋 Final Clinical Report")
-                     st.success(result.get("final_report"))
-                     
-                     with st.expander("See Reasoning Trace"):
-                         st.markdown(f"**Vision Agent:** {result.get('vision_analysis')}")
-                         st.markdown(f"**Risk Agent:** {result.get('risk_analysis')}")
-                         st.markdown(f"**Diagnostic Logic:** {result.get('diagnostic_reasoning')}")
-                 except Exception as e:
-                     st.error(f"Agent execution failed: {e}")
+            try:
+                agent_graph = build_agent_graph()
+                result = agent_graph.invoke(state_input)
+                
+                st.markdown("### 📋 Final Clinical Report")
+                st.success(result.get("final_report"))
+                
+                with st.expander("See Reasoning Trace"):
+                    st.markdown(f"**Vision Agent:** {result.get('vision_analysis')}")
+                    st.markdown(f"**Risk Agent:** {result.get('risk_analysis')}")
+                    st.markdown(f"**Diagnostic Logic:** {result.get('diagnostic_reasoning')}")
+            except Exception as e:
+                st.error(f"Agent execution failed: {e}")
 
 if __name__ == "__main__":
     main()
