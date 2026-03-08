@@ -21,3 +21,7 @@ class AgentState(TypedDict):
     # Flags
     needs_review: bool
     segmentation_available: bool
+    hvf_available: bool
+    
+    # HVF
+    hvf_metrics: Dict[str, float | str]
